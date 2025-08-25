@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Deskew & Perspective Correction</title>
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #canvasContainer { position: relative; display: inline-block; }
+    #canvasOutput, #canvasResult { border: 1px solid #333; max-width: 100%; }
+    .point {
+      width: 12px; height: 12px; border-radius: 50%;
+      background: red; position: absolute; cursor: move;
+      transform: translate(-50%, -50%);
+    }
+  </style>
+</head>
+<body>
+  <h2>Auto Deskew & Perspective Correction</h2>
+  <input type="file" id="fileInput" accept="image/*"><br><br>
+  <button id="deskewBtn">🔄 Auto Deskew</button>
+  <button id="perspectiveBtn">📐 Apply Perspective</button>
+  <div id="canvasContainer">
+    <canvas id="canvasOutput"></canvas>
+  </div>
+  <h3>Corrected Result:</h3>
+  <canvas id="canvasResult"></canvas>
+
+  <script>
+    let srcMat, displayCanvas, ctx;
+    let points = [];
+    let draggingPoint = null;
+
+    // Wait until OpenCV.js is ready
+    cv['onRuntimeInitialized'] = () => {
+      console.log("✅ OpenCV.js loaded");
+
+      const fileInput = document.getElementById('fileInput');
+      const deskewBtn = document.getElementById('deskewBtn');
+      const perspectiveBtn = document.getElementById('perspectiveBtn');
+
+      fileInput.addEventListener('change', (e) => {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        let img = new Image();
+        img.onload = () => {
+          displayCanvas = document.getElementById('canvasOutput');
+          ctx = displayCanvas.getContext('2d');
+          displayCanvas.width = img.width;
+          displayCanvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+
+          // Load into OpenCV Mat
+          if (srcMat) srcMat.delete();
+          srcMat = cv.imread(displayCanvas);
+
+          // Place draggable 4 points initially at corners
+          initPoints(img.width, img.height);
+        };
+        img.src = URL.createObjectURL(file);
+      });
+
+      deskewBtn.onclick = autoDeskew;
+      perspectiveBtn.onclick = applyPerspective;
+    };
+
+    // ---- Initialize 4 draggable points for perspective ----
+    function initPoints(w, h) {
+      let container = document.getElementById('canvasContainer');
+      container.querySelectorAll('.point').forEach(p => p.remove());
+      points = [
+        {x: 20, y: 20},
+        {x: w-20, y: 20},
+        {x: w-20, y: h-20},
+        {x: 20, y: h-20}
+      ];
+      points.forEach((p, i) => {
+        let div = document.createElement("div");
+        div.className = "point";
+        div.style.left = p.x + "px";
+        div.style.top = p.y + "px";
+        div.onmousedown = () => draggingPoint = i;
+        container.appendChild(div);
+      });
+      window.onmousemove = (e) => {
+        if (draggingPoint !== null) {
+          let rect = displayCanvas.getBoundingClientRect();
+          points[draggingPoint].x = e.clientX - rect.left;
+          points[draggingPoint].y = e.clientY - rect.top;
+          updatePointsUI();
+        }
+      };
+      window.onmouseup = () => draggingPoint = null;
+    }
+
+    function updatePointsUI() {
+      let dots = document.querySelectorAll(".point");
+      dots.forEach((d, i) => {
+        d.style.left = points[i].x + "px";
+        d.style.top = points[i].y + "px";
+      });
+    }
+
+    // ---- AUTO DESKEW USING HOUGH LINES ----
+    function autoDeskew() {
+      if (!srcMat) return;
+
+      let gray = new cv.Mat();
+      cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY, 0);
+      cv.threshold(gray, gray, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+
+      let lines = new cv.Mat();
+      cv.HoughLines(gray, lines, 1, Math.PI / 180, 150, 0, 0);
+
+      let angle = 0.0;
+      if (lines.rows > 0) {
+        for (let i = 0; i < lines.rows; ++i) {
+          let rho = lines.data32F[i*2];
+          let theta = lines.data32F[i*2+1];
+          angle += (theta - Math.PI/2); // deviation from vertical
+        }
+        angle = angle / lines.rows * (180 / Math.PI);
+      }
+
+      let center = new cv.Point(srcMat.cols/2, srcMat.rows/2);
+      let M = cv.getRotationMatrix2D(center, angle, 1);
+      let dst = new cv.Mat();
+      cv.warpAffine(srcMat, dst, M, new cv.Size(srcMat.cols, srcMat.rows), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+
+      cv.imshow("canvasResult", dst);
+
+      gray.delete(); lines.delete(); dst.delete(); M.delete();
+    }
+
+    // ---- MANUAL PERSPECTIVE CORRECTION ----
+    function applyPerspective() {
+      if (!srcMat || points.length < 4) return;
+
+      let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        points[0].x, points[0].y,
+        points[1].x, points[1].y,
+        points[2].x, points[2].y,
+        points[3].x, points[3].y
+      ]);
+      let w = srcMat.cols, h = srcMat.rows;
+      let dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        0,0,
+        w,0,
+        w,h,
+        0,h
+      ]);
+      let M = cv.getPerspectiveTransform(srcTri, dstTri);
+      let dst = new cv.Mat();
+      cv.warpPerspective(srcMat, dst, M, new cv.Size(w,h), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+
+      cv.imshow("canvasResult", dst);
+
+      srcTri.delete(); dstTri.delete(); M.delete(); dst.delete();
+    }
+  </script>
+</body>
+</html>
